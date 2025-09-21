@@ -17,7 +17,7 @@ const bot = new Bot(token);
 const mainMenu = new Keyboard()
   .text("/positions").row()
   .text("My Settings")
-  .url("Connect Wallet", "https://placeholder.com")
+  .text("Connect Wallet (Coming Soon)") // Placeholder
   .resized();
 
 bot.command("start", async (ctx) => {
