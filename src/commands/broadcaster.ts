@@ -1,16 +1,31 @@
 
 import { Bot, Context } from 'grammy';
-import { userDatabase, mockPrices } from '../core/db';
+import axios from 'axios';
 
 // Replace with your actual Telegram ID for testing
 const BROADCASTER_IDS = [7300924119]; 
 
+// Mock token prices for validation
+const mockPrices: { [key: string]: number } = {
+  'APT': 8.50,
+  'SUI': 1.25,
+  'BTC': 65000,
+};
+
 export const registerBroadcasterCommands = (bot: Bot<Context>) => {
+  const backendUrl = process.env.BACKEND_URL;
+  
+  if (!backendUrl) {
+    console.error('BACKEND_URL environment variable is not set');
+    throw new Error('BACKEND_URL environment variable is required');
+  }
+
   /**
    * /signal [buy|sell] [amount] [token]
    * Allows broadcasters to send trading signals.
    */
   bot.command('signal', async (ctx) => {
+    console.log('signal command triggered');
     const userId = ctx.from?.id;
     if (!userId || !BROADCASTER_IDS.includes(userId)) {
       await ctx.reply('You are not authorized to use this command.');
@@ -31,50 +46,43 @@ export const registerBroadcasterCommands = (bot: Bot<Context>) => {
       return;
     }
 
-    const broadcasterId = `Trader${userId}`; // Using Telegram ID as trader name
-    const followers: number[] = [];
+    try {
+      console.log(`Sending signal: ${action} ${amount} ${token} from broadcaster ${userId}`);
+      const response = await axios.post(`${backendUrl}/signal`, { 
+        broadcasterId: userId,
+        action, 
+        amount, 
+        token 
+      });
 
-    // Find all users following this broadcaster
-    userDatabase.forEach((userData, followerId) => {
-      if (userData.following.includes(broadcasterId)) {
-        followers.push(followerId);
+      const { data } = response.data as any;
+      
+      if (data.followerCount === 0) {
+        await ctx.reply('No one is following you.');
+        return;
       }
-    });
 
-    if (followers.length === 0) {
-      await ctx.reply('No one is following you.');
-      return;
-    }
+      await ctx.reply(`🚀 Signal Sent! Executing ${action.toUpperCase()} ${amount} ${token} for ${data.followerCount} followers.`);
 
-    await ctx.reply(`🚀 Signal Sent! Executing ${action.toUpperCase()} ${amount} ${token} for ${followers.length} followers.`);
-
-    // Simulate trade execution for each follower
-    for (const followerId of followers) {
-      const followerData = userDatabase.get(followerId);
-      if (followerData && followerData.tradeAmount > 0) {
+      // Send notifications to all followers
+      for (const follower of data.followers) {
         const price = mockPrices[token];
-        const quantity = followerData.tradeAmount / price;
+        const quantity = follower.trade_amount / price;
 
-        // Add the new position to the follower's data
-        followerData.openPositions.push({
-          token,
-          quantity,
-          entryPrice: price,
-        });
-        userDatabase.set(followerId, followerData);
-
-        // Send notification to the follower
-        const message = `✅ Trade Executed | Following ${broadcasterId}\n` +
-                        `- Bought: ${quantity.toFixed(2)} ${token}\n` +
+        const message = `✅ Trade Executed | Following Trader${userId}\n` +
+                        `- ${action === 'buy' ? 'Bought' : 'Sold'}: ${quantity.toFixed(2)} ${token}\n` +
                         `- Price: $${price.toFixed(2)}\n` +
-                        `- Cost: ${followerData.tradeAmount} USDC`;
+                        `- Cost: ${follower.trade_amount} USDC`;
         
         try {
-          await bot.api.sendMessage(followerId, message);
+          await bot.api.sendMessage(follower.telegram_id, message);
         } catch (error) {
-          console.error(`Failed to send message to ${followerId}:`, error);
+          console.error(`Failed to send message to ${follower.telegram_id}:`, error);
         }
       }
+    } catch (error) {
+      console.error('Error sending signal:', error);
+      await ctx.reply('Failed to send signal. Please try again.');
     }
   });
 };

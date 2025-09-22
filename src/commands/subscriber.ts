@@ -1,20 +1,84 @@
 
 import { Bot, Context } from 'grammy';
-import { userDatabase, mockPrices } from '../core/db';
+import axios from 'axios';
 import { mainMenu } from '../core/menu';
 
-export const registerSubscriberCommands = (bot: Bot<Context>) => {
-  /**
-   * /start command
-   * Welcomes the user and displays the main menu.
-   */
-  bot.command('start', async (ctx) => {
-    const userId = ctx.from?.id;
-    if (userId && !userDatabase.has(userId)) {
-      // Initialize user data if it's their first time
-      userDatabase.set(userId, { following: [], tradeAmount: 0, openPositions: [] });
-    }
+const showHelp = async (ctx: Context) => {
+  console.log('help command triggered');
+  await ctx.reply(
+    'Available commands:\n' +
+    '/follow <trader_id> - Follow a new trader.\n' +
+    '/unfollow <trader_id> - Unfollow a trader.\n' +
+    '/set_trade_amount <amount> - Set your per-trade amount.\n' +
+    '/my_settings - View your current settings.\n' +
+    '/positions - View your open positions.'
+  );
+};
 
+const showSettings = async (ctx: Context) => {
+  const userId = ctx.from?.id;
+  if (userId) {
+    try {
+      const backendUrl = process.env.BACKEND_URL;
+      const response = await axios.get(`${backendUrl}/users/${userId}/details`);
+      const data = response.data as { settings: { trade_amount: number }, following: number[] };
+      await ctx.reply(
+        `--- Your Settings ---\n` +
+        `- Following: ${data.following.join(', ') || 'None'}\n` +
+        `- Per-Trade Amount: ${data.settings.trade_amount} USDC`
+      );
+    } catch (error) {
+      console.error('Error fetching settings:', error);
+      await ctx.reply('Could not fetch your settings. Please try again.');
+    }
+  }
+};
+
+const showPositions = async (ctx: Context) => {
+  const userId = ctx.from?.id;
+  if (userId) {
+    try {
+      const backendUrl = process.env.BACKEND_URL;
+      const response = await axios.get(`${backendUrl}/positions/${userId}`);
+      const positions = response.data as any[];
+
+      if (positions.length === 0) {
+        await ctx.reply('You have no open positions.');
+        return;
+      }
+
+      let message = '--- Your Open Positions ---\n';
+      positions.forEach(p => {
+        message += `\n[${p.action.toUpperCase()}] ${p.quantity.toFixed(2)} ${p.token} at $${p.entry_price.toFixed(2)}`;
+      });
+
+      await ctx.reply(message);
+    } catch (error) {
+      console.error('Error fetching positions:', error);
+      await ctx.reply('Could not fetch your positions. Please try again.');
+    }
+  }
+};
+
+export const registerSubscriberCommands = (bot: Bot<Context>) => {
+  const backendUrl = process.env.BACKEND_URL;
+  
+  if (!backendUrl) {
+    console.error('BACKEND_URL environment variable is not set');
+    throw new Error('BACKEND_URL environment variable is required');
+  }
+
+  bot.command('start', async (ctx) => {
+    console.log('start command triggered');
+    const userId = ctx.from?.id;
+    const username = ctx.from?.username;
+    if (userId) {
+      try {
+        await axios.post(`${backendUrl}/users`, { telegramId: userId, username });
+      } catch (error) {
+        console.error('Error creating user:', error);
+      }
+    }
     await ctx.reply(
       'Welcome to SignalFi! Connect your wallet and set your trade amount to get started.',
       {
@@ -23,171 +87,73 @@ export const registerSubscriberCommands = (bot: Bot<Context>) => {
     );
   });
 
-  /**
-   * /help command
-   * Lists available commands.
-   */
-  bot.command('help', async (ctx) => {
-    await ctx.reply(
-      'Available commands:\n' +
-        '/follow <trader_id> - Follow a new trader.\n' +
-        '/unfollow <trader_id> - Unfollow a trader.\n' +
-        '/set_trade_amount <amount> - Set your per-trade amount.\n' +
-        '/my_settings - View your current settings.\n' +
-        '/positions - View your open positions.'
-    );
-  });
+  bot.command('help', showHelp);
+  bot.hears('❓ Help', showHelp);
 
-  /**
-   * /follow <trader_id> command
-   * Adds a trader to the user's following list.
-   */
   bot.command('follow', async (ctx) => {
+    console.log('follow command triggered');
     const userId = ctx.from?.id;
-    const traderId = ctx.match;
-
-    if (!userId) {
-      return;
+    const broadcasterId = parseInt(ctx.match, 10);
+    console.log(`userId: ${userId}, broadcasterId: ${broadcasterId}, match: "${ctx.match}"`);
+    if (userId && !isNaN(broadcasterId)) {
+      try {
+        console.log(`Making request to: ${backendUrl}/subscriptions`);
+        await axios.post(`${backendUrl}/subscriptions`, { followerId: userId, broadcasterId });
+        await ctx.reply(`✅ You are now following trader ${broadcasterId}.`);
+      } catch (error) {
+        console.error('Error following trader:', error);
+        await ctx.reply('Could not follow trader. Please try again.');
+      }
+    } else {
+      await ctx.reply('Please provide a valid trader ID.');
     }
-
-    if (!traderId) {
-      await ctx.reply('Please provide a trader ID. Usage: /follow TraderX');
-      return;
-    }
-
-    const userData = userDatabase.get(userId) || { following: [], tradeAmount: 0, openPositions: [] };
-    if (!userData.following.includes(traderId)) {
-      userData.following.push(traderId);
-      userDatabase.set(userId, userData);
-    }
-
-    await ctx.reply(`✅ You are now following ${traderId}.`);
+  });
+  bot.hears('🚀 Follow a Trader', async (ctx) => {
+    await ctx.reply('To follow a trader, use the command: /follow <trader_id>');
   });
 
-  /**
-   * /unfollow <trader_id> command
-   * Removes a trader from the user's following list.
-   */
   bot.command('unfollow', async (ctx) => {
     const userId = ctx.from?.id;
-    const traderId = ctx.match;
-
-    if (!userId) {
-      return;
-    }
-
-    if (!traderId) {
-      await ctx.reply('Please provide a trader ID. Usage: /unfollow TraderX');
-      return;
-    }
-
-    const userData = userDatabase.get(userId);
-    if (userData && userData.following.includes(traderId)) {
-      userData.following = userData.following.filter((id) => id !== traderId);
-      userDatabase.set(userId, userData);
-      await ctx.reply(`ℹ️ You have unfollowed ${traderId}.`);
+    const broadcasterId = parseInt(ctx.match, 10);
+    if (userId && !isNaN(broadcasterId)) {
+      try {
+        await axios({
+          method: 'delete',
+          url: `${backendUrl}/subscriptions`,
+          data: { followerId: userId, broadcasterId }
+        });
+        await ctx.reply(`ℹ️ You have unfollowed trader ${broadcasterId}.`);
+      } catch (error) {
+        console.error('Error unfollowing trader:', error);
+        await ctx.reply('Could not unfollow trader. Please try again.');
+      }
     } else {
-      await ctx.reply(`You are not following ${traderId}.`);
+      await ctx.reply('Please provide a valid trader ID.');
     }
   });
 
-  /**
-   * /set_trade_amount <amount> command
-   * Sets the user's per-trade amount.
-   */
   bot.command('set_trade_amount', async (ctx) => {
+    console.log('set_trade_amount command triggered');
     const userId = ctx.from?.id;
-    const amountStr = ctx.match;
-
-    if (!userId) {
-      return;
-    }
-
-    if (!amountStr) {
-      await ctx.reply('Please provide an amount. Usage: /set_trade_amount 50');
-      return;
-    }
-
-    const amount = parseFloat(amountStr);
-    if (isNaN(amount) || amount <= 0) {
-      await ctx.reply('Please provide a valid positive number. Usage: /set_trade_amount 50');
-      return;
-    }
-
-    const userData = userDatabase.get(userId) || { following: [], tradeAmount: 0, openPositions: [] };
-    userData.tradeAmount = amount;
-    userDatabase.set(userId, userData);
-
-    await ctx.reply(`✅ Your per-trade amount is now set to ${amount}.`);
-  });
-
-  /**
-   * /my_settings command
-   * Displays the user's current settings.
-   */
-  bot.command('my_settings', async (ctx) => {
-    const userId = ctx.from?.id;
-    if (!userId) return;
-
-    const userData = userDatabase.get(userId);
-    if (userData) {
-      await ctx.reply(
-        `--- Your Settings ---\n` +
-        `- Following: ${userData.following.join(', ') || 'None'}\n` +
-        `- Per-Trade Amount: ${userData.tradeAmount} USDC`
-      );
+    const amount = parseFloat(ctx.match);
+    console.log(`userId: ${userId}, amount: ${amount}, match: "${ctx.match}"`);
+    if (userId && !isNaN(amount) && amount > 0) {
+      try {
+        console.log(`Making request to: ${backendUrl}/settings/${userId}`);
+        await axios.put(`${backendUrl}/settings/${userId}`, { tradeAmount: amount });
+        await ctx.reply(`✅ Your per-trade amount is now set to ${amount}.`);
+      } catch (error) {
+        console.error('Error setting trade amount:', error);
+        await ctx.reply('Could not set trade amount. Please try again.');
+      }
     } else {
-      await ctx.reply("You don't have any settings yet. Use /start to begin.");
+      await ctx.reply('Please provide a valid positive number.');
     }
   });
 
-  /**
-   * /positions command
-   * Displays the user's open positions.
-   */
-  bot.command('positions', async (ctx) => {
-    const userId = ctx.from?.id;
-    if (!userId) return;
-
-    const userData = userDatabase.get(userId);
-    if (userData && userData.openPositions.length > 0) {
-      let message = '--- Your Open Positions ---\n';
-      userData.openPositions.forEach((pos, index) => {
-        const currentValue = pos.quantity * (mockPrices[pos.token] || pos.entryPrice);
-        const entryValue = pos.quantity * pos.entryPrice;
-        const pnl = currentValue - entryValue;
-        const pnlSign = pnl >= 0 ? '+' : '-';
-        message += `${index + 1}. ${pos.token}: ${pos.quantity.toFixed(2)} units | Entry: $${pos.entryPrice.toFixed(2)} | PnL: ${pnlSign}$${Math.abs(pnl).toFixed(2)}\n`;
-      });
-      await ctx.reply(message);
-    } else {
-      await ctx.reply('You have no open positions.');
-    }
-  });
-
-    // Handle bot text messages for menu buttons
-    bot.on('message:text', async (ctx) => {
-        const text = ctx.message.text;
-        switch (text) {
-            case '🚀 Follow a Trader':
-                await ctx.reply("To follow a trader, use the /follow command followed by the trader's ID. For example: `/follow TraderX`");
-                break;
-            case '⚙️ My Settings':
-                await ctx.reply("To check your settings, use the /my_settings command.");
-                break;
-            case '📊 My Positions':
-                await ctx.reply("To check your positions, use the /positions command.");
-                break;
-            case '❓ Help':
-                await ctx.reply(
-                    'Available commands:\n' +
-                    '/follow <trader_id> - Follow a new trader.\n' +
-                    '/unfollow <trader_id> - Unfollow a trader.\n' +
-                    '/set_trade_amount <amount> - Set your per-trade amount.\n' +
-                    '/my_settings - View your current settings.\n' +
-                    '/positions - View your open positions.'
-                );
-                break;
-        }
-    });
+  bot.command('my_settings', showSettings);
+  bot.hears('⚙️ My Settings', showSettings);
+  
+  bot.command('positions', showPositions);
+  bot.hears('📊 My Positions', showPositions);
 };
