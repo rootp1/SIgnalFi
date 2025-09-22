@@ -1,0 +1,9 @@
+[package]
+name = "SignalFiContract"
+version = "1.0.0"
+
+[dependencies]
+AptosFramework = { git = "https://github.com/aptos-labs/aptos-core.git", rev = "testnet", subdir = "aptos-move/framework/aptos-framework" }
+
+[addresses]
+# This section is now empty for the test.
