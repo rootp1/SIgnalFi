@@ -1,157 +1,192 @@
-// src/bot.ts
-import { Bot, Keyboard } from "grammy";
-import * as dotenv from "dotenv";
+
+import { Bot, Keyboard } from 'grammy';
+import dotenv from 'dotenv';
 
 // Load environment variables from .env file
 dotenv.config();
 
-// Get the token from the environment variables
+// 1. Setup and Initialization
+// ---------------------------
+
+// Get bot token from environment variable
 const token = process.env.TELEGRAM_BOT_TOKEN;
 if (!token) {
-  throw new Error("TELEGRAM_BOT_TOKEN is not set in the .env file!");
+  console.error('Error: TELEGRAM_BOT_TOKEN is not set in the environment variables.');
+  process.exit(1);
 }
 
-// 1. --- MOCK DATABASE ---
-// We'll use a simple Map to store user settings in memory.
-// The key is the user's Telegram ID (a number).
-interface UserSettings {
-  following: string[];
-  tradeAmount: number;
-  token: string;
-}
-const userSettingsDB = new Map<number, UserSettings>();
-
-// 2. --- BOT SETUP ---
+// Initialize a new bot instance
 const bot = new Bot(token);
 
-// 3. --- REUSABLE MENU ---
-// Create a persistent menu that will appear with the /start and /menu commands
+// Define the structure for user data
+interface UserData {
+  following: string[];
+  tradeAmount: number;
+}
+
+// Create an in-memory Map to act as a mock database
+const userDatabase = new Map<number, UserData>();
+
+// 2. Create a Persistent Menu
+// ---------------------------
+
 const mainMenu = new Keyboard()
-  .text("Follow a Trader").row()
-  .text("My Settings").row()
-  .text("Connect Wallet (Coming Soon)") // Placeholder text
-  .resized(); // Makes the keyboard smaller
+  .text('🚀 Follow a Trader')
+  .text('⚙️ My Settings')
+  .text('❓ Help')
+  .row()
+  .resized()
+  .persistent();
 
-// 4. --- BOT COMMANDS ---
+// 3. Implement Core Commands
+// --------------------------
 
-// Handle the /start command
-bot.command("start", async (ctx) => {
+/**
+ * /start command
+ * Welcomes the user and displays the main menu.
+ */
+bot.command('start', async (ctx) => {
   const userId = ctx.from?.id;
-  if (userId && !userSettingsDB.has(userId)) {
-    // Initialize settings for a new user
-    userSettingsDB.set(userId, {
-        following: [],
-        tradeAmount: 0,
-        token: 'USDC'
-    });
+  if (userId && !userDatabase.has(userId)) {
+    // Initialize user data if it's their first time
+    userDatabase.set(userId, { following: [], tradeAmount: 0 });
   }
 
   await ctx.reply(
-    "Welcome to SignalFi! 🚀\n\nI can help you copy-trade like a pro, right here on Telegram.\n\nUse the menu below to get started.",
+    'Welcome to SignalFi! Connect your wallet and set your trade amount to get started.',
     {
       reply_markup: mainMenu,
     }
   );
 });
 
-// Handle the /help command
-bot.command("help", async (ctx) => {
-    await ctx.reply(
-        "--- Available Commands ---\n\n" +
-        "/start - Launch the bot and show the main menu.\n" +
-        "/menu - Show the main menu again.\n" +
-        "/follow <trader_id> - Start copying a trader.\n" +
-        "/unfollow <trader_id> - Stop copying a trader.\n" +
-        "/set_trade_amount <amount> <token> - Set your amount per trade (e.g., /set_trade_amount 50 USDC).\n" +
-        "/my_settings - View your current configuration."
-    );
+/**
+ * /help command
+ * Lists available commands.
+ */
+bot.command('help', async (ctx) => {
+  await ctx.reply(
+    'Available commands:\n' +
+      '/follow <trader_id> - Follow a new trader.\n' +
+      '/unfollow <trader_id> - Unfollow a trader.\n' +
+      '/set_trade_amount <amount> - Set your per-trade amount.'
+  );
 });
 
-// Handle the /menu command
-bot.command("menu", async (ctx) => {
-    await ctx.reply("Here is the main menu:", {
-        reply_markup: mainMenu,
-    });
+/**
+ * /follow <trader_id> command
+ * Adds a trader to the user's following list.
+ */
+bot.command('follow', async (ctx) => {
+  const userId = ctx.from?.id;
+  const traderId = ctx.match;
+
+  if (!userId) {
+    return; // Should not happen in a command context
+  }
+
+  if (!traderId) {
+    await ctx.reply('Please provide a trader ID. Usage: /follow TraderX');
+    return;
+  }
+
+  const userData = userDatabase.get(userId) || { following: [], tradeAmount: 0 };
+  if (!userData.following.includes(traderId)) {
+    userData.following.push(traderId);
+    userDatabase.set(userId, userData);
+  }
+
+  await ctx.reply(`✅ You are now following ${traderId}.`);
 });
 
+/**
+ * /unfollow <trader_id> command
+ * Removes a trader from the user's following list.
+ */
+bot.command('unfollow', async (ctx) => {
+  const userId = ctx.from?.id;
+  const traderId = ctx.match;
 
-// 5. --- SUBSCRIBER COMMANDS ---
-// For now, these commands just update our mock database.
+  if (!userId) {
+    return;
+  }
 
-bot.command("follow", async (ctx) => {
-    const userId = ctx.from.id;
-    const traderId = ctx.match; // The text after the command
+  if (!traderId) {
+    await ctx.reply('Please provide a trader ID. Usage: /unfollow TraderX');
+    return;
+  }
 
-    if (!traderId) {
-        return ctx.reply("Please specify a trader ID to follow. \nExample: /follow TraderX");
-    }
-
-    const settings = userSettingsDB.get(userId) || { following: [], tradeAmount: 0, token: 'USDC' };
-    if (!settings.following.includes(traderId)) {
-        settings.following.push(traderId);
-        userSettingsDB.set(userId, settings);
-        await ctx.reply(`✅ You are now following ${traderId}.`);
-    } else {
-        await ctx.reply(`You are already following ${traderId}.`);
-    }
+  const userData = userDatabase.get(userId);
+  if (userData && userData.following.includes(traderId)) {
+    userData.following = userData.following.filter((id) => id !== traderId);
+    userDatabase.set(userId, userData);
+    await ctx.reply(`ℹ️ You have unfollowed ${traderId}.`);
+  } else {
+    await ctx.reply(`You are not following ${traderId}.`);
+  }
 });
 
-bot.command("unfollow", async (ctx) => {
-    const userId = ctx.from.id;
-    const traderId = ctx.match;
+/**
+ * /set_trade_amount <amount> command
+ * Sets the user's per-trade amount.
+ */
+bot.command('set_trade_amount', async (ctx) => {
+  const userId = ctx.from?.id;
+  const amountStr = ctx.match;
 
-    if (!traderId) {
-        return ctx.reply("Please specify a trader ID to unfollow. \nExample: /unfollow TraderX");
-    }
+  if (!userId) {
+    return;
+  }
 
-    const settings = userSettingsDB.get(userId);
-    if (settings && settings.following.includes(traderId)) {
-        settings.following = settings.following.filter(t => t !== traderId);
-        userSettingsDB.set(userId, settings);
-        await ctx.reply(`ℹ️ You have stopped following ${traderId}.`);
-    } else {
-        await ctx.reply(`You are not currently following ${traderId}.`);
-    }
+  if (!amountStr) {
+    await ctx.reply('Please provide an amount. Usage: /set_trade_amount 50');
+    return;
+  }
+
+  const amount = parseFloat(amountStr);
+  if (isNaN(amount) || amount <= 0) {
+    await ctx.reply('Please provide a valid positive number. Usage: /set_trade_amount 50');
+    return;
+  }
+
+  const userData = userDatabase.get(userId) || { following: [], tradeAmount: 0 };
+  userData.tradeAmount = amount;
+  userDatabase.set(userId, userData);
+
+  await ctx.reply(`✅ Your per-trade amount is now set to ${amount}.`);
 });
 
-bot.command("set_trade_amount", async (ctx) => {
-    const userId = ctx.from.id;
-    // e.g., "50 USDC"
-    const args = ctx.match.split(" ");
-    const amount = parseFloat(args[0]);
-    const token = args[1]?.toUpperCase() || 'USDC';
+// 4. Start the Bot
+// ----------------
 
-    if (isNaN(amount) || amount <= 0) {
-        return ctx.reply("Please provide a valid number for the amount. \nExample: /set_trade_amount 50 USDC");
-    }
-
-    const settings = userSettingsDB.get(userId) || { following: [], tradeAmount: 0, token: 'USDC' };
-    settings.tradeAmount = amount;
-    settings.token = token;
-    userSettingsDB.set(userId, settings);
-
-    await ctx.reply(`✅ Your trade amount has been set to ${amount} ${token} per trade.`);
-});
-
-// This command is useful for debugging our mock data
-bot.command("my_settings", async (ctx) => {
-    const userId = ctx.from.id;
-    const settings = userSettingsDB.get(userId);
-
-    if (!settings) {
-        return ctx.reply("I don't have any settings for you yet. Press /start to begin.");
-    }
-    
-    const followingList = settings.following.length > 0 ? settings.following.join(', ') : 'None';
-    
-    await ctx.reply(
-        `--- Your Settings ---\n\n` +
-        `- Following: ${followingList}\n` +
-        `- Per-Trade Amount: ${settings.tradeAmount} ${settings.token}`
-    );
-});
-
-
-// 6. --- START THE BOT ---
 bot.start();
-console.log("Bot is running!");
+console.log('Bot is running...');
+
+// Handle bot text messages for menu buttons
+bot.on('message:text', async (ctx) => {
+    const text = ctx.message.text;
+    switch (text) {
+        case '🚀 Follow a Trader':
+            await ctx.reply("To follow a trader, use the /follow command followed by the trader's ID. For example: `/follow TraderX`");
+            break;
+        case '⚙️ My Settings':
+            const userId = ctx.from?.id;
+            if (userId) {
+                const userData = userDatabase.get(userId);
+                if (userData) {
+                    await ctx.reply(`Your current settings:\n- Following: ${userData.following.join(', ') || 'None'}\n- Trade Amount: ${userData.tradeAmount}`);
+                } else {
+                    await ctx.reply("You don't have any settings yet. Use /start to begin.");
+                }
+            }
+            break;
+        case '❓ Help':
+            await ctx.reply(
+                'Available commands:\n' +
+                '/follow <trader_id> - Follow a new trader.\n' +
+                '/unfollow <trader_id> - Unfollow a trader.\n' +
+                '/set_trade_amount <amount> - Set your per-trade amount.'
+            );
+            break;
+    }
+});
