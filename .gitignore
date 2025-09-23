@@ -1,7 +1,8 @@
-/node_modules
+node_modules
 package-lock.json
 .env
 /backend/node_modules
 /contracts/build
 /.vscode
 /contracts/.aptos
+build
