@@ -10,9 +10,36 @@ if (!token) {
   throw new Error("TELEGRAM_BOT_TOKEN is not set in the .env file!");
 }
 
-const API_BASE_URL = 'http://localhost:3000/api';
+const API_BASE_URL = (process.env.BACKEND_BASE_URL || 'http://localhost:3000') + '/api';
 
 const bot = new Bot(token);
+
+// --- Instrumentation for debugging startup & silent failures ---
+// Log bot identity on startup and basic environment hints
+(async () => {
+  try {
+    const me = await fetch(`https://api.telegram.org/bot${token}/getMe`).then(r => r.json());
+    console.log('[bot:init] getMe response:', me);
+  } catch (e) {
+    console.error('[bot:init] getMe failed', e);
+  }
+})();
+
+// Global error catcher so failures are visible
+bot.catch(err => {
+  console.error('[bot:error]', err.error || err);
+});
+
+// Log each incoming update (can be verbose; disable later if noisy)
+bot.use(async (ctx, next) => {
+  try {
+    const kind = Object.keys(ctx.update).filter(k => k !== 'update_id').join(',');
+    console.log('[bot:update]', { update_id: (ctx.update as any).update_id, kind, from: ctx.from?.id, text: (ctx.message as any)?.text });
+  } catch (e) {
+    console.error('[bot:update.log.error]', e);
+  }
+  return next();
+});
 
 const mainMenu = new Keyboard()
   .text("/positions").row()
@@ -26,25 +53,50 @@ bot.command("start", async (ctx: any) => {
   });
 });
 
+// Simple health / ping command to verify responsiveness
+bot.command('ping', async (ctx: any) => {
+  const t0 = Date.now();
+  const msg = await ctx.reply('pong');
+  const dt = Date.now() - t0;
+  console.log('[bot:ping]', { from: ctx.from?.id, latency_ms: dt, message_id: msg.message_id });
+});
+
+// Convenience command to display numeric Telegram user ID
+bot.command('id', async (ctx: any) => {
+  if (!ctx.from) return;
+  await ctx.reply(`Your Telegram numeric ID: ${ctx.from.id}`);
+});
+
 // Refactored command to call the backend
 bot.command("follow", async (ctx: any) => {
   if (!ctx.from) return;
   const userId = ctx.from.id;
-  const traderId = ctx.match;
-
-  if (!traderId) {
-      return ctx.reply("Please specify a trader ID.");
+  const raw = ctx.match?.trim();
+  if (!raw) {
+    return ctx.reply("Usage: /follow <traderId>");
   }
-
+  const traderToFollow = Number(raw);
+  if (Number.isNaN(traderToFollow)) {
+    return ctx.reply("Trader ID must be a number.");
+  }
   try {
-      await axios.post(`${API_BASE_URL}/follow`, {
-          userId: userId,
-          traderToFollow: traderId
-      });
-      await ctx.reply(`✅ Follow request sent for ${traderId}.`);
-  } catch (error) {
-      console.error("API call to /follow failed:", error);
-      await ctx.reply("Sorry, something went wrong.");
+    const resp = await axios.post(`${API_BASE_URL}/follow`, { userId, traderToFollow });
+    if (resp.data?.message === 'Already following') {
+      await ctx.reply(`ℹ️ You already follow ${traderToFollow}.`);
+    } else {
+      await ctx.reply(`✅ Now following ${traderToFollow}.`);
+    }
+  } catch (error: any) {
+    const code = error?.response?.data?.error?.code;
+    const msg = error?.response?.data?.error?.message;
+    if (code === 'VALIDATION') {
+      return ctx.reply(`Validation failed: ${msg}`);
+    }
+    if (code === 'DB_ERROR') {
+      return ctx.reply('Database error while following. Try again later.');
+    }
+    console.error("/follow command error", error?.response?.data || error);
+    await ctx.reply("Follow failed (unexpected error).");
   }
 });
 
@@ -267,7 +319,118 @@ bot.command('verifyanchor', async (ctx) => {
   }
 });
 
-// TODO: Add other refactored commands here...
+// /executions [limit]
+bot.command('executions', async (ctx: any) => {
+  const arg = ctx.match?.trim();
+  const limit = arg && !Number.isNaN(Number(arg)) ? Math.min(Number(arg), 10) : 5;
+  try {
+    const resp = await axios.get(`${API_BASE_URL}/executed-trades/recent?limit=${limit}`);
+    const list: any[] = resp.data.executed || [];
+    if (!list.length) return ctx.reply('No recent executions.');
+    const lines = list.map(r => {
+      const v = r.onchain_verified ? '✅' : (r.error === 'PLAN_HASH_MISMATCH' ? '⚠️' : '⏳');
+      return `${r.id} • ${r.status} • slip:${r.slippage_bps ?? '-'} • ${v}`;
+    });
+    await ctx.reply(lines.join('\n'));
+  } catch (e) {
+    console.error('executions cmd error', e);
+    await ctx.reply('Failed to fetch executions.');
+  }
+});
+
+// /execution <id>
+bot.command('execution', async (ctx: any) => {
+  const idRaw = ctx.match?.trim();
+  if (!idRaw) return ctx.reply('Usage: /execution <id>');
+  const id = Number(idRaw);
+  if (Number.isNaN(id)) return ctx.reply('Invalid id');
+  try {
+    const resp = await axios.get(`${API_BASE_URL}/executed-trade/${id}`);
+    const r = resp.data.executed;
+    const v = r.onchain_verified ? '✅ verified' : (r.error === 'PLAN_HASH_MISMATCH' ? '⚠️ plan hash mismatch' : '⏳ pending');
+    await ctx.reply(`Exec #${r.id}\nStatus: ${r.status}\nTx: ${r.tx_hash || '-'}\nSlippage bps: ${r.slippage_bps ?? '-'}\nFollowers: ${r.follower_count ?? '-'}\nPlan Hash: ${r.plan_hash?.slice(0,10) || '-'}\nIntent Hash: ${r.intent_hash?.slice(0,10) || '-'}\nOn-chain: ${v}`);
+  } catch (e) {
+    console.error('execution cmd error', e);
+    await ctx.reply('Failed to fetch execution.');
+  }
+});
+
+// /verifyexec <id>
+bot.command('verifyexec', async (ctx: any) => {
+  const idRaw = ctx.match?.trim();
+  if (!idRaw) return ctx.reply('Usage: /verifyexec <executionId>');
+  const id = Number(idRaw);
+  if (Number.isNaN(id)) return ctx.reply('Invalid id');
+  try {
+    await axios.get(`${API_BASE_URL}/executed-trade/${id}/verify`);
+    await ctx.reply('Verification cycle queued. Re-run /execution ' + id + ' shortly.');
+  } catch (e) {
+    console.error('verifyexec error', e);
+    await ctx.reply('Failed to queue verification.');
+  }
+});
+
+// /signalfull <signalId>
+bot.command('signalfull', async (ctx: any) => {
+  const idRaw = ctx.match?.trim();
+  if (!idRaw) return ctx.reply('Usage: /signalfull <signalId>');
+  const id = Number(idRaw);
+  if (Number.isNaN(id)) return ctx.reply('Invalid id');
+  try {
+    const resp = await axios.get(`${API_BASE_URL}/signal/${id}/full`);
+    const d = resp.data;
+    const sig = d.signal; const intent = d.intent; const exec = d.execution; const anchor = d.anchor;
+    const lines = [] as string[];
+    lines.push(`Signal #${id} trader:${sig.trader_id}`);
+    if (intent) lines.push(`Intent: ${intent.action} ${intent.market} size=${intent.size_value}`);
+    if (anchor) lines.push(`Anchor: ${anchor.status} seq=${anchor.seq ?? '-'} ver=${anchor.verification_status ?? '-'}`);
+    if (exec) lines.push(`Exec: ${exec.status} slip=${exec.slippage_bps ?? '-'} onchain=${exec.onchain_verified ? 'yes' : 'no'}`);
+    await ctx.reply(lines.join('\n'));
+  } catch (e) {
+    console.error('signalfull error', e);
+    await ctx.reply('Failed to fetch full signal.');
+  }
+});
+
+// /anchors [limit]
+bot.command('anchors', async (ctx: any) => {
+  const arg = ctx.match?.trim();
+  const limit = arg && !Number.isNaN(Number(arg)) ? Math.min(Number(arg), 10) : 5;
+  try {
+    const resp = await axios.get(`${API_BASE_URL}/anchors/recent?limit=${limit}`);
+    const anchors: any[] = resp.data.anchors || [];
+    if (!anchors.length) return ctx.reply('No recent anchors.');
+    const lines = anchors.map(a => `${a.signal_id} • ${a.status} • ${a.tx_hash ? a.tx_hash.slice(0,10) : '-'}`);
+    await ctx.reply(lines.join('\n'));
+  } catch (e) {
+    console.error('anchors cmd error', e);
+    await ctx.reply('Failed to fetch anchors.');
+  }
+});
+
+// /metrics - show aggregate
+bot.command('metrics', async (ctx: any) => {
+  try {
+    const resp = await axios.get(`${API_BASE_URL}/metrics`);
+    const m = resp.data;
+    const ex = m.executedTrades;
+    const sl = m.slippage;
+    await ctx.reply(`Execs: total=${ex.total} executed=${ex.executed} failed=${ex.failed} pending=${ex.pending}\nVerified=${ex.verified} mismatches=${ex.planHashMismatches}\nSlippage avg=${sl.avg_bps} p90=${sl.p90} n=${sl.count}`);
+  } catch (e) {
+    console.error('metrics cmd error', e);
+    await ctx.reply('Failed to fetch metrics.');
+  }
+});
+
+// /help - list commands
+bot.command('help', async (ctx: any) => {
+  const cmds = [
+    '/follow <traderId>', '/unfollow <traderId>', '/list', '/settings [..]', '/signal <json>',
+    '/signals [traderId]', '/signalfull <id>', '/executions [limit]', '/execution <id>', '/verifyexec <id>',
+    '/anchors [limit]', '/onchain [traderId]', '/verifyanchor <signalId>', '/metrics', '/walletstatus', '/connectwallet'
+  ];
+  await ctx.reply(cmds.join('\n'));
+});
 
 bot.start();
 console.log("Bot is running and connected to the backend.");

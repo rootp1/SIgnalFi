@@ -8,8 +8,7 @@ interface PendingRow {
   follower_id: number;
   attempts: number;
   last_error: string | null;
-  payload: any;
-  trader_id: number;
+  signal: { trader_id: number; payload: any };
 }
 
 const MAX_ATTEMPTS = Number(process.env.DELIVERY_MAX_ATTEMPTS || 5);
@@ -45,7 +44,11 @@ async function processQueue() {
 
 async function handleRow(row: PendingRow) {
   const supabase = getSupabase();
-  const text = formatSignalMessage(row.trader_id, row.payload);
+  if (!row.signal || !row.signal.payload) {
+    logger.warn({ id: row.id }, 'delivery.row.missing_payload');
+    return;
+  }
+  const text = formatSignalMessage(row.signal.trader_id, row.signal.payload);
   const ok = await sendTelegramMessage(row.follower_id, text);
   if (ok) {
     const { error } = await supabase

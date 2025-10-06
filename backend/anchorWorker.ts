@@ -56,7 +56,7 @@ async function handleAnchor(row: any) {
       txHash = '0xSIMULATED_' + Date.now();
       seq = (traderRow.last_onchain_seq || 0) + 1;
     }
-    const { error: upErr } = await supabase.from('anchored_signals').update({ status: 'anchored', seq, tx_hash: txHash, payload_hash: payloadHash, attempts: (row.attempts||0) }).eq('id', row.id);
+  const { error: upErr } = await supabase.from('anchored_signals').update({ status: 'anchored', seq, tx_hash: txHash, payload_hash: payloadHash, attempts: (row.attempts||0), verification_status: 'verified', verified_at: new Date().toISOString() }).eq('id', row.id);
     if (upErr) logger.error({ id: row.id, err: upErr }, 'anchor.update.error');
     const { error: seqErr } = await supabase.from('traders').update({ last_onchain_seq: seq }).eq('telegram_user_id', traderId);
     if (seqErr) logger.error({ traderId, err: seqErr }, 'anchor.seq.update.error');

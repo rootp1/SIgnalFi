@@ -17,6 +17,7 @@ import { hashPayload } from './hash';
 import { getSupabase as _getSupabase } from './supabaseClient';
 import { fetchNextSeq, fetchLastAnchor, fetchTransaction } from './aptosClient';
 import { startTradeExecutorWorker } from './tradeExecutorWorker';
+import { startExecutionReconciliationWorker } from './reconciliationWorker';
 
 dotenv.config();
 
@@ -544,7 +545,7 @@ app.get('/api/executed-trades/recent', async (req, res) => {
     const supabase = getSupabase();
     const { data, error } = await supabase
       .from('executed_trades')
-      .select('id, trade_intent_id, signal_id, status, tx_hash, size_value, slippage_bps, error, created_at, executed_at, intent_hash, anchor_id, payload_hash, plan_hash')
+  .select('id, trade_intent_id, signal_id, status, tx_hash, size_value, slippage_bps, error, created_at, executed_at, intent_hash, anchor_id, payload_hash, plan_hash, follower_count, onchain_verified, onchain_event_ts, onchain_event_version, onchain_event_tx_hash, attempts, next_attempt_at')
       .order('id', { ascending: false })
       .limit(limit);
     if (error) return respondError(res, { code: 'DB_ERROR', message: 'Database error' }, 500);
@@ -561,12 +562,100 @@ app.get('/api/executed-trade/:id', async (req, res) => {
     const supabase = getSupabase();
     const { data, error } = await supabase
       .from('executed_trades')
-      .select('id, trade_intent_id, signal_id, status, tx_hash, size_value, slippage_bps, error, created_at, executed_at, intent_hash, anchor_id, payload_hash, plan_hash')
+  .select('id, trade_intent_id, signal_id, status, tx_hash, size_value, slippage_bps, error, created_at, executed_at, intent_hash, anchor_id, payload_hash, plan_hash, follower_count, onchain_verified, onchain_event_ts, onchain_event_version, onchain_event_tx_hash, attempts, next_attempt_at')
       .eq('id', id)
       .maybeSingle();
     if (error) return respondError(res, { code: 'DB_ERROR', message: 'Database error' }, 500);
     if (!data) return respondError(res, { code: 'NOT_FOUND', message: 'Not found' }, 404);
     return respondSuccess(res, { executed: data });
+  } catch (e) {
+    return respondError(res, { code: 'INTERNAL', message: 'Internal error' }, 500);
+  }
+});
+
+// Verify (reconcile) a specific executed trade by intent hash against recent on-chain events
+app.get('/api/executed-trade/:id/verify', async (req, res) => {
+  const id = Number(req.params.id);
+  if (Number.isNaN(id)) return respondError(res, { code: 'VALIDATION', message: 'invalid id' });
+  try {
+    const supabase = getSupabase();
+    const { data: row, error } = await supabase.from('executed_trades').select('id, intent_hash, onchain_verified').eq('id', id).maybeSingle();
+    if (error) return respondError(res, { code: 'DB_ERROR', message: 'Database error' }, 500);
+    if (!row) return respondError(res, { code: 'NOT_FOUND', message: 'Not found' }, 404);
+    // Lightweight: trigger reconciliation cycle logic by marking row for verification (set onchain_verified NULL)
+    if (row.onchain_verified === false) {
+      const { error: upErr } = await supabase.from('executed_trades').update({ onchain_verified: null }).eq('id', id);
+      if (upErr) logger.warn({ id, err: upErr }, 'exec.verify.reset.warn');
+    }
+    return respondSuccess(res, { queued: true });
+  } catch (e) {
+    return respondError(res, { code: 'INTERNAL', message: 'Internal error' }, 500);
+  }
+});
+
+// Basic metrics (Step 3): aggregated counts & slippage distribution (simple query approach)
+app.get('/api/metrics', async (_req, res) => {
+  try {
+    const supabase = getSupabase();
+    // Parallel-ish queries (sequential to keep simple; could optimize later)
+    const { data: execRecent } = await supabase.rpc ? { data: null } : { data: null }; // placeholder if using RPC later
+    const { data: counts, error: cErr } = await supabase
+      .from('executed_trades')
+      .select('status, onchain_verified, error, slippage_bps, plan_hash, id, onchain_event_version', { count: 'exact', head: false })
+      .order('id', { ascending: false })
+      .limit(500);
+    if (cErr) return respondError(res, { code: 'DB_ERROR', message: 'metrics query failed' }, 500);
+    const total = counts?.length || 0;
+    let executed = 0, failed = 0, pending = 0, simulated = 0;
+    let verified = 0, mismatches = 0;
+    const slippages: number[] = [];
+    for (const r of counts || []) {
+      switch (r.status) { case 'executed': executed++; break; case 'failed': failed++; break; case 'pending': pending++; break; case 'simulated': simulated++; break; }
+      if (r.onchain_verified) verified++; else if (r.error === 'PLAN_HASH_MISMATCH') mismatches++;
+      if (typeof r.slippage_bps === 'number') slippages.push(r.slippage_bps);
+    }
+    slippages.sort((a,b)=>a-b);
+    const slipCount = slippages.length;
+    const slipAvg = slipCount ? slippages.reduce((a,b)=>a+b,0)/slipCount : 0;
+    const p = (q: number) => slipCount ? slippages[Math.min(slipCount-1, Math.floor(q*slipCount))] : 0;
+    return respondSuccess(res, {
+      executedTrades: { total, executed, simulated, pending, failed, verified, planHashMismatches: mismatches },
+      slippage: { count: slipCount, avg_bps: Number(slipAvg.toFixed(2)), p50: p(0.5), p90: p(0.9), p99: p(0.99) }
+    });
+  } catch (e) {
+    return respondError(res, { code: 'INTERNAL', message: 'metrics internal error' }, 500);
+  }
+});
+
+// Unified full signal view: combines signal payload, trade intent, anchor, executed trade (if any)
+app.get('/api/signal/:id/full', async (req, res) => {
+  const id = Number(req.params.id);
+  if (Number.isNaN(id)) return respondError(res, { code: 'VALIDATION', message: 'invalid id' });
+  try {
+    const supabase = getSupabase();
+    const { data: signalRow, error: sErr } = await supabase
+      .from('signals')
+      .select('id, trader_id, payload, created_at')
+      .eq('id', id)
+      .maybeSingle();
+    if (sErr) return respondError(res, { code: 'DB_ERROR', message: 'Database error' }, 500);
+    if (!signalRow) return respondError(res, { code: 'NOT_FOUND', message: 'Signal not found' }, 404);
+    const { data: intentRow } = await supabase
+      .from('trade_intents')
+      .select('id, action, market, size_mode, size_value, max_slippage_bps, deadline_ts, intent_hash, created_at')
+      .eq('signal_id', id)
+      .maybeSingle();
+    const { data: anchorRow } = await supabase
+      .from('anchored_signals')
+      .select('id, status, tx_hash, payload_hash, seq, verification_status, verified_at')
+      .eq('signal_id', id)
+      .maybeSingle();
+    const { data: execRow } = await supabase
+      .from('executed_trades')
+      .select('id, status, tx_hash, size_value, slippage_bps, error, created_at, executed_at, intent_hash, anchor_id, payload_hash, plan_hash, follower_count, onchain_verified, onchain_event_ts, onchain_event_version, onchain_event_tx_hash')
+      .eq('signal_id', id)
+      .maybeSingle();
+    return respondSuccess(res, { signal: signalRow, intent: intentRow || null, anchor: anchorRow || null, execution: execRow || null });
   } catch (e) {
     return respondError(res, { code: 'INTERNAL', message: 'Internal error' }, 500);
   }
@@ -691,6 +780,7 @@ app.listen(PORT, () => {
   startDeliveryWorker();
   startAnchorWorker();
   startTradeExecutorWorker();
+  startExecutionReconciliationWorker();
   // Periodic reconciliation (every 5 minutes)
   const reconMs = Number(process.env.ONCHAIN_RECON_INTERVAL_MS || 300000);
   setInterval(async () => {
