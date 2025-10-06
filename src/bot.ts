@@ -223,6 +223,50 @@ bot.command('signals', async (ctx: any) => {
   }
 });
 
+// /onchain [traderId?] -> show next seq & divergence
+bot.command('onchain', async (ctx: any) => {
+  if (!ctx.from) return;
+  const arg = ctx.match?.trim();
+  const traderId = arg ? Number(arg) : ctx.from.id;
+  if (!traderId || Number.isNaN(traderId)) return ctx.reply('Usage: /onchain [traderId]');
+  try {
+    const resp = await axios.get(`${API_BASE_URL}/trader/${traderId}/onchain/status`);
+    const d = resp.data;
+    const diverge = d.diverged ? '⚠️ mismatch' : '✅ synced';
+    await ctx.reply(`On-Chain Status for ${traderId}\nNext Seq: ${d.chainNext}\nChain Last: ${d.chainLast}\nDB Last: ${d.dbLast}\n${diverge}`);
+  } catch (e: any) {
+    const code = e?.response?.data?.error?.code;
+    if (code === 'NOT_ONCHAIN') return ctx.reply('Trader not on-chain enabled.');
+    console.error('onchain status error', e?.response?.data || e);
+    await ctx.reply('Failed to fetch on-chain status');
+  }
+});
+
+// /verifyanchor <signalId>
+bot.command('verifyanchor', async (ctx) => {
+  const parts = ctx.message?.text?.trim().split(/\s+/) || [];
+  if (parts.length < 2) {
+    return ctx.reply('Usage: /verifyanchor <signalId>');
+  }
+  const signalId = Number(parts[1]);
+  if (Number.isNaN(signalId)) return ctx.reply('Invalid signal id');
+  try {
+    const base = process.env.BACKEND_BASE_URL || 'http://localhost:3000';
+    const r = await fetch(`${base}/api/anchor/${signalId}/verify`);
+    const j = await r.json();
+    if (!r.ok) {
+      return ctx.reply(`Verify error: ${j.error?.code || r.status}`);
+    }
+    if (j.data?.verified) {
+      return ctx.reply(`✅ Anchor verified on-chain for signal ${signalId}`);
+    } else {
+      return ctx.reply(`❌ Not verified (${j.data?.reason || 'no match'})`);
+    }
+  } catch (e: any) {
+    return ctx.reply('Internal error verifying anchor');
+  }
+});
+
 // TODO: Add other refactored commands here...
 
 bot.start();

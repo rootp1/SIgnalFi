@@ -28,7 +28,16 @@ export const signalPayloadSchema = z.object({
   size: z.number().positive().optional(),
   confidence: z.number().min(0).max(100).optional(),
   note: z.string().max(300).optional(),
-  metadata: z.record(z.any()).optional()
+  metadata: z.record(z.any()).optional(),
+  // Phase 1 intent (optional)
+  intent: z.object({
+    action: z.enum(['BUY','SELL','LONG','SHORT']).optional(),
+    market: z.string().min(1).max(30).optional(),
+    sizeMode: z.enum(['PERCENT','NOTIONAL']).optional(),
+    sizeValue: z.number().positive().optional(),
+    maxSlippageBps: z.number().int().positive().max(10_000).optional(),
+    deadlineTs: z.number().int().positive().optional()
+  }).optional()
 });
 
 export const signalRequestSchema = z.object({

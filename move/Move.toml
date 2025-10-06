@@ -1,0 +1,9 @@
+[package]
+name = "SignalFi"
+version = "0.0.1"
+
+[addresses]
+signalfi = "0x9df71c207a5be671c4bea3b1db225481c91c7d8ce01f69051f076c8890a5306b"
+
+[dependencies]
+AptosFramework = { git = "https://github.com/aptos-labs/aptos-core.git", subdir = "aptos-move/framework/aptos-framework", rev = "main" }
